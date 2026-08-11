@@ -1,0 +1,15 @@
+audio_encoder: openai/whisper-small
+llm: Qwen/Qwen2.5-0.5B-Instruct
+projector_hidden: 1536
+audio_pool_stride: 4
+max_audio_seconds: 30
+max_target_tokens: 128
+batch_size: 1
+grad_accum_steps: 8
+epochs: 3
+learning_rate: 0.0002
+weight_decay: 0.01
+num_workers: 0
+mixed_precision: bf16
+output_dir: checkpoints/poc
+system_prompt: You are a concise voice assistant. Understand the user's speech and answer helpfully.
