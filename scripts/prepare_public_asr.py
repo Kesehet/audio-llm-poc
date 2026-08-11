@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 from pathlib import Path
 
@@ -45,26 +46,37 @@ DATASETS = {
 }
 
 
-def decode_audio(value):
-    """Support both legacy datasets Audio dicts and newer torchcodec decoders."""
-    if isinstance(value, dict):
-        if value.get("array") is not None:
-            return np.asarray(value["array"], dtype=np.float32), int(value["sampling_rate"])
-        if value.get("path"):
-            audio, sr = librosa.load(value["path"], sr=None, mono=True)
-            return audio.astype(np.float32), int(sr)
+def _mono_float32(audio):
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 2:
+        # soundfile returns [samples, channels]
+        audio = audio.mean(axis=1)
+    return audio
 
-    if hasattr(value, "get_all_samples"):
-        samples = value.get_all_samples()
-        data = samples.data
-        if hasattr(data, "detach"):
-            data = data.detach().cpu().numpy()
-        data = np.asarray(data, dtype=np.float32)
-        if data.ndim > 1:
-            data = data.mean(axis=0)
-        return data, int(samples.sample_rate)
 
-    raise TypeError(f"Unsupported audio value: {type(value)!r}")
+def decode_raw_audio(value):
+    """Decode datasets Audio(decode=False) values without TorchCodec."""
+    if not isinstance(value, dict):
+        raise TypeError(f"Expected raw audio dict, got {type(value)!r}")
+
+    raw_bytes = value.get("bytes")
+    path = value.get("path")
+
+    if raw_bytes:
+        audio, sr = sf.read(io.BytesIO(raw_bytes), dtype="float32", always_2d=False)
+        return _mono_float32(audio), int(sr)
+
+    if path:
+        # Local/cache paths can be read by soundfile/librosa. For uncommon codecs,
+        # librosa/audioread provides a fallback.
+        try:
+            audio, sr = sf.read(path, dtype="float32", always_2d=False)
+            return _mono_float32(audio), int(sr)
+        except Exception:
+            audio, sr = librosa.load(path, sr=None, mono=True)
+            return np.asarray(audio, dtype=np.float32), int(sr)
+
+    raise ValueError("Audio row has neither bytes nor path")
 
 
 def main():
@@ -88,11 +100,23 @@ def main():
     audio_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out / "manifest.jsonl"
 
+    print(f"Loading {spec['id']} / {spec['config']} / {split} (streaming={args.streaming})")
     ds = load_dataset(spec["id"], spec["config"], split=split, streaming=args.streaming)
-    if hasattr(ds, "cast_column"):
-        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+
+    # IMPORTANT: do not let Hugging Face decode audio here. Current datasets
+    # versions use TorchCodec/FFmpeg for Audio decoding, which can hard-abort in
+    # some Colab runtimes. We request raw bytes/path and decode with soundfile.
+    try:
+        ds = ds.cast_column("audio", Audio(decode=False))
+    except Exception:
+        # Streaming IterableDataset also exposes decode(False) in newer releases.
+        if hasattr(ds, "decode"):
+            ds = ds.decode(False)
+        else:
+            raise
 
     count = 0
+    skipped = 0
     with manifest_path.open("w", encoding="utf-8") as manifest:
         for row_index, row in enumerate(tqdm(ds, desc=args.dataset)):
             if args.limit and count >= args.limit:
@@ -100,12 +124,14 @@ def main():
 
             text = str(row.get(spec["text"], "")).strip()
             if not text:
+                skipped += 1
                 continue
 
             try:
-                audio, sample_rate = decode_audio(row["audio"])
+                audio, sample_rate = decode_raw_audio(row["audio"])
             except Exception as exc:
-                print(f"skip row {row_index}: {exc}")
+                skipped += 1
+                print(f"skip row {row_index}: {type(exc).__name__}: {exc}")
                 continue
 
             if sample_rate != 16000:
@@ -128,7 +154,9 @@ def main():
             manifest.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
 
-    print(f"Wrote {count} examples to {manifest_path}")
+    print(f"Wrote {count} examples to {manifest_path}; skipped {skipped}")
+    if count == 0:
+        raise RuntimeError("No audio examples were prepared. See skip messages above.")
 
 
 if __name__ == "__main__":
