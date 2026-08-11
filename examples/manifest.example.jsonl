@@ -1,0 +1,3 @@
+{"audio":"audio/check_balance.wav","response":"Sure. Please provide your account number."}
+{"audio":"audio/reset_password.wav","response":"I can help with that. First, I need to verify your identity."}
+{"audio":"audio/order_status.wav","response":"Sure. What is your order number?","prompt":"Answer as a customer support agent."}
